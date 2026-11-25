@@ -131,6 +131,9 @@
   #menu .mInv .st{grid-column:1/-1;font-size:12px;color:#1f6f65;min-height:0}
   #menu .mInv .st:empty{display:none}
   #hoCopy2{flex:0 0 auto}
+  #rpBar{position:fixed;left:50%;bottom:calc(14px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:30;display:flex;align-items:center;gap:10px;background:rgba(10,14,26,.82);color:#fff;padding:8px 10px 8px 16px;border-radius:999px;width:min(520px,calc(100vw - 24px))}
+  #rpBar.hidden{display:none}#rpBar b{font-size:14px}#rpBar .rpTrack{flex:1;height:6px;border-radius:3px;background:rgba(255,255,255,.18);overflow:hidden}#rpBar .rpTrack i{display:block;height:100%;width:0;background:#2a9d8f}
+  #rpBar .btn{padding:7px 12px;font-size:13px;margin:0}
   #specBar{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(14px + var(--pad-b));z-index:6;display:flex;gap:10px;align-items:center;background:rgba(10,14,30,.8);border:1px solid rgba(255,255,255,.18);border-radius:14px;padding:8px 8px 8px 14px;font-weight:600;backdrop-filter:blur(4px)}
   .teamRow .pl{grid-area:pl}
   .codeBox{width:100%;height:84px;font:11px/1.35 ui-monospace,Menlo,Consolas,monospace;background:rgba(255,255,255,.06);color:#fff;border:1px solid rgba(255,255,255,.2);border-radius:10px;padding:8px;word-break:break-all;resize:none}
@@ -298,7 +301,7 @@
         <ol class="invSteps">
           <li>Tap <b>Text invite</b> next to a friend and send it to <b>just that friend</b>.</li>
           <li>They open it once, so their phone remembers their team.</li>
-          <li>Tap <b>Start match</b> and take the first turn. When you're done, you'll get a message to paste in your group chat.</li>
+          <li>Tap <b>Start match</b>. A coin flip picks who goes first. If it's not you, you'll get a message to send to your group chat.</li>
         </ol>
         <div id="mInvList"></div>
         <p class="note" id="mInvNote" style="margin:10px 0 0"></p>
@@ -377,6 +380,7 @@
       <div class="recap" id="ciRecap"></div>
       <p class="note" id="ciWarn" style="color:#ffd166;margin:8px 0 0"></p>
     </div>
+    <button class="btn hidden" id="ciReplay" style="width:100%;margin-top:10px">Watch the last turn</button>
     <div class="btnRow"><button class="btn" id="ciCancel">Main menu</button><button class="big hidden" id="ciGo" style="margin:0;flex:1.4">Play</button></div>
   </div>
 </div>
@@ -396,6 +400,7 @@
     <div class="btnRow"><button class="big" id="iiOk" style="margin:0">Got it</button></div>
   </div>
 </div>
+<div id="rpBar" class="hidden"><b>Replay</b><div class="rpTrack"><i id="rpFill"></i></div><button class="btn" id="rpSpeed">2×</button><button class="btn" id="rpSkip">Skip</button></div>
 <div id="specBar" class="hidden"><span id="specText"></span><button class="btn" id="specMenu">Main menu</button></div>
 <div id="pinGate" class="overlay hidden">
   <div class="panel center">
@@ -811,9 +816,10 @@ function newGame(cfg){
       worms.push(w); t.worms.push(w); break;
     }
   }
-  maxTeamHp = cfg.n*100; turnTime = cfg.turnTime;
+  maxTeamHp = cfg.n*100; turnTime = cfg.turnTime; REC=null;
   curTeam = (Math.random()*teams.length|0) - 1; if(curTeam<0) curTeam = teams.length-1;
-  if(MATCH) curTeam = teams.length-1;
+  if(MATCH){ curTeam = Math.floor(Math.random()*teams.length); MATCH.first = (curTeam+1)%teams.length; }
+  if(MATCH) setTimeout(recStart,0);
   if(MATCH && cfg.inv){ teams.forEach((t,i)=>{ if(!t.cpu) t.keyHash=cfg.inv.hashes[i]||null; });
     const hi=teams.findIndex(t=>!t.cpu); if(hi>=0){ if(storageWorks()) store.set(claimKey(MATCH.id,hi),cfg.inv.secrets[hi]); else teams[hi].keyHash=null; MATCH.mine.add(hi); }
     clearInvites(); }
@@ -842,6 +848,7 @@ function nextTurn(){
 function beginTurn(){
   const t=teams[curTeam];
   if(MATCH) MATCH.recap.push(`${t.name} — ${active.name}${t.cpu?' (CPU)':''}`);
+  recEv(1,curTeam,worms.indexOf(active));
   turnT=turnTime; power=0; charging=false; usedWeapon=false; shotsLeft=0; camFree=false; followTarget=false;
   wpIdx = t.ammo[t.lastWp]!==0 ? t.lastWp : 0;
   target = {x:active.x+active.facing*120, y:active.y-50};
@@ -961,7 +968,7 @@ function wormAir(w,dt){
 }
 function hurt(w,dm){
   if(dm<=0||!w.alive) return;
-  w.hp-=dm; floatText(w.x,w.y-26,'-'+dm,w.team.color);
+  w.hp-=dm; floatText(w.x,w.y-26,'-'+dm,w.team.color); recEv(3,worms.indexOf(w),Math.round(dm));
   if(MATCH){ const k=w.name; MATCH.dmg[k]=(MATCH.dmg[k]||0)+dm; }
   const atk=active; if(atk) w.lastHitBy=atk;
   if(!w.dying){
@@ -978,13 +985,13 @@ function creditKill(v){
   const k=v.lastHitBy;
   if(!k||!k.alive||k.dying||k===v) return;
   if(k.team!==v.team){
-    emote(k,'gloat',2.4); say(k,pick(LINES.gloat),2.2); sfxT('snicker',0.3);
+    emote(k,'gloat',2.4); say(k,pick(LINES.gloat),2.2); sfxT('snicker',0.3); recEv(10,worms.indexOf(k));
     for(const m of k.team.worms) if(m!==k && m.alive && !m.dying && Math.random()<0.6){ emote(m,'smirk',1.5); if(Math.random()<0.35) say(m,pick(LINES.smirk),1.4); }
   } else { emote(k,'oops',2); say(k,pick(LINES.oops),2); }
 }
 function drown(w){
   if(MATCH){ recapDamage(); MATCH.recap.push(`   ${w.name} (${w.team.name}) fell in the water`); }
-  w.alive=false; w.hp=0; w.dying=null; splash(w.x); floatText(w.x,WATER-20,'Splash!','#bfe6ff');
+  recEv(5,worms.indexOf(w)); w.alive=false; w.hp=0; w.dying=null; splash(w.x); floatText(w.x,WATER-20,'Splash!','#bfe6ff');
   addP({t:'ghost',x:w.x,y:WATER-8,f:w.facing,b:w.breed,c:w.team.color,life:2.4});
   creditKill(w); if(state==='settle') settleT=Math.max(settleT,2);
   if(w===active) endTurn();
@@ -992,6 +999,7 @@ function drown(w){
 function startDying(w){ w.dying={t:0}; w.emote=null; w.idle=null; say(w,pick(LINES.death),2.4); sfxT('whimper',0.2); }
 function finalizeDeath(w){
   if(MATCH){ recapDamage(); MATCH.recap.push(`   ${w.name} (${w.team.name}) is out`); }
+  recEv(4,worms.indexOf(w));
   w.alive=false; w.dying=null; w.say=null;
   explode(w.x,w.y,24,12);
   props.push({kind:'grave', x:w.x, y:w.y, vx:0, vy:-80, bounce:0.2, team:w.team});
@@ -1000,6 +1008,7 @@ function finalizeDeath(w){
   if(state==='settle') settleT=2.3;
 }
 function explode(x,y,r,dmg){
+  recEv(2,Math.round(x),Math.round(y),Math.round(r));
   carve(x,y,r); sfx.boom(r/50); shake=Math.min(20, shake + r/4);
   boomFx(x,y,r);
   for(const w of worms){
@@ -1036,7 +1045,7 @@ function fireWeapon(){
   if(!active||!active.alive||state!=='aim') return;
   const t=teams[curTeam], wp=curWp();
   if(t.ammo[wpIdx]===0){ charging=false; return; }
-  const p=charging?power:1; charging=false; power=0;
+  const p=charging?power:1; charging=false; power=0; recEv(6,wpIdx);
   const a=active, dir={x:a.facing*Math.cos(a.aim), y:Math.sin(a.aim)};
   let ok=true;
   switch(wp.id){
@@ -1059,7 +1068,7 @@ function fireWeapon(){
       if(a.rope){ releaseRope(a,false); return; }
       const hit=rayRope(a.x,a.y,dir.x,dir.y);
       if(!hit){ addP({t:'tracer',x:a.x,y:a.y,x2:a.x+dir.x*ROPE_MAX,y2:a.y+dir.y*ROPE_MAX,life:0.2}); sfx.oops(); return; }
-      a.rope={ax:hit.x, ay:hit.y, len:Math.max(18,Math.hypot(hit.x-a.x,hit.y-a.y)-2)}; a.air=true; a.airT=0; a.chute=false; a.y-=1; sfx.clink();
+      a.rope={ax:hit.x, ay:hit.y, len:Math.max(18,Math.hypot(hit.x-a.x,hit.y-a.y)-2)}; recEv(7,worms.indexOf(a),Math.round(hit.x),Math.round(hit.y)); a.air=true; a.airT=0; a.chute=false; a.y-=1; sfx.clink();
       return; }
     case 'parachute': {
       if(a.chute){ a.chute=false; return; }
@@ -1194,6 +1203,7 @@ function packMatch(o){
   u(o.cur); i(o.act); i(o.wind*1000);
   const rc=(o.recap||[]).slice(-12); u(rc.length); for(const l of rc) str(l);
   i(o.over==null?-2:o.over);
+  if(o.rpb&&o.rpb.length){ u(o.rpb.length); for(const c of o.rpb) b.push(c); }
   return new Uint8Array(b);
 }
 function unpackMatch(b){
@@ -1213,6 +1223,7 @@ function unpackMatch(b){
   o.cur=u(); o.act=i(); o.wind=i()/1000;
   o.recap=[]; for(let n=u();n--;) o.recap.push(str());
   const ov=i(); o.over= ov===-2 ? null : ov;
+  if(p<b.length){ try{ const n=u(); o.rpb=b.slice(p,p+n); p+=n; }catch(e){ o.rpb=null; } }
   return o;
 }
 async function encodeMatch(obj){
@@ -1313,6 +1324,7 @@ function turnSummary(lines){
 function turnMessage(link,final,lines){
   if(final){ const w=final.winner; return w ? `Game over — ${w.name}${w.player?` (${w.player})`:''} win Kibbles ’n’ Blitz! See how it ended: ${link}` : `Kibbles ’n’ Blitz ended in a draw! ${link}`; }
   const t=teams[curTeam], sum=turnSummary(lines);
+  if(MATCH && MATCH.turn===1 && !sum) return `${t.player||t.name}, you're up first in Kibbles ’n’ Blitz!${t.player&&t.player!==t.name?` (${t.name})`:''} The coin flip picked you.\n${link}`;
   return `${t.player||t.name}, you're up in Kibbles ’n’ Blitz!${t.player&&t.player!==t.name?` (${t.name})`:''}${sum?`\nLast turn: ${sum}`:''}\n${link}`;
 }
 const poss=n=>/s$/i.test(n)?n+'’':n+'’s';
@@ -1324,12 +1336,13 @@ async function handOff(final){
   if(MATCH.att>1) MATCH.recap.push(`   (played on the ${ord(MATCH.att)} try)`);
   state = final ? 'over' : 'handoff';
   const r1=v=>Math.round(v*10)/10; for(const w of worms){ w.x=r1(w.x); w.y=r1(w.y); w.vx=w.vy=0; } for(const p of props){ p.x=r1(p.x); p.y=r1(p.y); }
-  const snap=snapshot(final), code=await encodeMatch(snap);
+  const snap=snapshot(final); snap.rpb=replayBytes(); recStart(); const code=await encodeMatch(snap);
   store.set(`bark:${MATCH.id}:seen`, String(Math.max(+store.get(`bark:${MATCH.id}:seen`)||0, MATCH.turn)));
   const el=document.getElementById('handoff');
   const nt=teams[curTeam];
-  document.getElementById('hoTitle').innerHTML = final ? (final.winner?`${teamChip(final.winner)} win!`:'Draw!') : `Turn done — next up: ${teamChip(nt)}${nt.player?` <span style="opacity:.75">(${escapeHtml(nt.player)})</span>`:''}`;
-  document.getElementById('hoSub').textContent = final ? 'Send this to the group so everyone can see how it ended.' : `Paste this in your group chat. Only ${nt.player||'the '+nt.name+' player'} can play from it.`;
+  const firstUp = !final && MATCH.turn===1;
+  document.getElementById('hoTitle').innerHTML = firstUp ? `Coin flip: ${teamChip(nt)}${nt.player?` <span style="opacity:.75">(${escapeHtml(nt.player)})</span>`:''} goes first!` : final ? (final.winner?`${teamChip(final.winner)} win!`:'Draw!') : `Turn done — next up: ${teamChip(nt)}${nt.player?` <span style="opacity:.75">(${escapeHtml(nt.player)})</span>`:''}`;
+  document.getElementById('hoSub').textContent = firstUp ? `Send this to your group chat so ${nt.player||'the '+nt.name+' player'} can start.` : final ? 'Send this to the group so everyone can see how it ended.' : `Paste this in your group chat. Only ${nt.player||'the '+nt.name+' player'} can play from it.`;
   document.getElementById('hoRecap').textContent = MATCH.recap.join('\n') || 'Nothing much happened…';
   document.getElementById('hoCode').value=turnMessage(LINK_BASE+'#'+code, final, MATCH.recap);
   document.getElementById('hoCopied').textContent='';
@@ -1413,8 +1426,9 @@ async function previewCode(){
       else if(t.kh){ pendingMode='spectate'; document.getElementById('ciHead').innerHTML=`Waiting on ${escapeHtml(who)} — ${teamChip(fakeT)}`; document.getElementById('ciWarn').textContent=(document.getElementById('ciWarn').textContent?document.getElementById('ciWarn').textContent+' ':'')+`If this is your team, open your invite link first, then tap this link again.`; document.getElementById('ciGo').textContent='View battlefield'; }
       else { pendingMode='pin'; document.getElementById('ciGo').textContent=`Play ${poss(t.nm)} turn`; }
     }
+    const rb=document.getElementById('ciReplay'); rb.classList.toggle('hidden',!s.rpb); rb.textContent='Watch the last turn';
     prev.classList.remove('hidden');
-  }catch(e){ err.textContent=e.message||String(e); pendingLoad=null; }
+  }catch(e){ document.getElementById('ciReplay').classList.add('hidden'); err.textContent=e.message||String(e); pendingLoad=null; }
 }
 function startLoaded(){
   const s=pendingLoad; if(!s) return;
@@ -1422,7 +1436,7 @@ function startLoaded(){
   store.set(`bark:${s.id}:seen`, String(Math.max(+store.get(`bark:${s.id}:seen`)||0, s.turn)));
   loadSnapshot(s);
   if(s.over!=null){ state='over'; const w=s.over>=0?teams[s.over]:null; active=null; showOver(w); return; }
-  const go=()=>{ const k=`bark:${s.id}:t${s.turn}`, n=(+store.get(k)||0)+1; store.set(k,String(n)); MATCH.att=n; beginTurn(); };
+  const go=()=>{ const k=`bark:${s.id}:t${s.turn}`, n=(+store.get(k)||0)+1; store.set(k,String(n)); MATCH.att=n; recStart(); beginTurn(); };
   for(let i=0;i<teams.length;i++){ if(store.get(claimKey(s.id,i))) MATCH.mine.add(i); }
   if(pendingMode==='spectate'){ MATCH.mine.clear(); state='handoff'; const t=teams[curTeam]; document.getElementById('specText').textContent=`Waiting on ${t.player||'the '+t.name+' player'}`; document.getElementById('specBar').classList.remove('hidden'); camFree=true; return; }
   if(pendingMode==='mine'){ const t=teams[curTeam]; if(!t.pinHash && !storageWorks()) { pinGate(go); return; } go(); return; }
@@ -1657,7 +1671,129 @@ function runAI(dt){
 }
 
 // ---------- update ----------
+// ---------- turn replays ----------
+// Visual recording of everything since this device received the link: positions of dogs, shots and crates,
+// plus events (explosions, damage, deaths). Played back on other phones from the turn link.
+let REC=null, RP=null;
+const RPK={bazooka:1,missile:2,grenade:3,holy:4,cluster:5,bit:6,dynamite:7,sheep:8,rsheep:9,crate:10,health:11,grave:12};
+const RPK_N=Object.fromEntries(Object.entries(RPK).map(([k,v])=>[v,k]));
+function recStart(){ if(!MATCH){ REC=null; return; }
+  REC={f:0, ops0:terrOps.length, opsSeen:terrOps.length, tr:new Map(), ev:[], nid:1,
+    hp0:worms.map(w=>Math.max(0,Math.round(w.hp))), alive0:worms.map(w=>w.alive?1:0), props0:[]};
+  for(const o of objs) o._rid=0;
+  REC.props0=props.map(p=>{ p._rid=REC_ID(); return [p.kind==='grave'?RPK.grave:p.type==='health'?RPK.health:RPK.crate, Math.round(p.x), Math.round(p.y), p.kind==='grave'?teams.indexOf(p.team):0, p._rid]; });
+  recSample(true); }
+function REC_ID(){ return REC ? REC.nid++ : 0; }
+function recEv(...a){ if(REC) REC.ev.push([REC.f,...a]); }
+function recPush(key,kind,x,y,fl,force){ let t=REC.tr.get(key); if(!t){ t={kind,pts:[]}; REC.tr.set(key,t); }
+  const l=t.pts[t.pts.length-1]; x=Math.round(x); y=Math.round(y);
+  if(force||!l||l[1]!==x||l[2]!==y||l[3]!==fl){ if(l && l[0]<REC.f-3) t.pts.push([REC.f-3,l[1],l[2],l[3]]); t.pts.push([REC.f,x,y,fl]); } }
+function recSample(force){
+  worms.forEach((w,i)=>{ if(!w.alive && !force) return; recPush('d'+i,0,w.x,w.y,(w.facing>0?1:0)|(w.air?2:0)|(w.chute?4:0)|(w.rope?8:0)|(w.dying?16:0),force); });
+  const seen=new Set();
+  for(const o of objs){ const k=RPK[o.kind]; if(!k) continue; if(!o._rid) o._rid=REC_ID(); seen.add(o._rid); recPush('o'+o._rid,k,o.x,o.y,((o.dir||Math.sign(o.vx)||1)>0?1:0)|(o.flying?2:0),false); }
+  for(const p of props){ if(!p._rid){ p._rid=REC_ID(); recEv(9,p._rid,p.kind==='grave'?RPK.grave:p.type==='health'?RPK.health:RPK.crate,p.kind==='grave'?teams.indexOf(p.team):0); }
+    seen.add(p._rid); recPush('p'+p._rid,0,p.x,p.y,p.chute?1:0,false); }
+  if(REC.live) for(const id of REC.live) if(!seen.has(id)) recEv(11,id);
+  REC.live=seen;
+}
+function recTick(){ if(!REC) return; REC.f++;
+  while(terrOps.length>REC.opsSeen){ REC.opsSeen++; recEv(8,REC.opsSeen); }
+  if(REC.f%3===0) recSample(false);
+  if(REC.f>60*600){ REC=null; } }
+// gone-events: compare live ids at each sample is costly; instead mark removal lazily when encoding (last point = end)
+function simplify(pts,tol){ if(pts.length<3) return pts.slice();
+  const keep=new Uint8Array(pts.length); keep[0]=keep[pts.length-1]=1;
+  const st=[[0,pts.length-1]];
+  while(st.length){ const [a,b]=st.pop(); let mi=-1, md=tol;
+    for(let k=a+1;k<b;k++){ const A=pts[a],B=pts[b],P=pts[k]; if(P[3]!==A[3]){ md=1e9; mi=k; break; }
+      const u=(P[0]-A[0])/((B[0]-A[0])||1), ex=A[1]+(B[1]-A[1])*u, ey=A[2]+(B[2]-A[2])*u, d=Math.hypot(P[1]-ex,P[2]-ey); if(d>md){ md=d; mi=k; } }
+    if(mi>0){ keep[mi]=1; st.push([a,mi],[mi,b]); } }
+  return pts.filter((_,k)=>keep[k]); }
+function encodeReplay(rec,tol){
+  const b=[]; const u=v=>{ v=Math.max(0,Math.round(v)); while(v>=128){ b.push((v%128)|128); v=Math.floor(v/128); } b.push(v); };
+  const i=v=>{ v=Math.round(v); u(v<0?-2*v-1:2*v); };
+  const T=f=>Math.round(f/3);
+  u(1); u(rec.ops0); u(T(rec.f));
+  u(rec.hp0.length); rec.hp0.forEach((h,k)=>{ u(h); u(rec.alive0[k]); });
+  u(rec.props0.length); for(const p of rec.props0){ u(p[0]); i(p[1]); i(p[2]); u(p[3]); u(p[4]); }
+  const tr=[...rec.tr.entries()].filter(([k,t])=>t.pts.length>1 || k[0]!=='d');
+  u(tr.length);
+  for(const [key,t] of tr){ const typ={d:0,o:1,p:2}[key[0]], id=+key.slice(1); u(typ); u(id); u(t.kind);
+    const pts=simplify(t.pts,tol); u(pts.length); let pf=0, px=0, py=0;
+    for(const q of pts){ u(T(q[0])-pf); i(q[1]-px); i(q[2]-py); u(q[3]); pf=T(q[0]); px=q[1]; py=q[2]; } }
+  u(rec.ev.length); let pf=0;
+  for(const e of rec.ev){ u(T(e[0])-pf); pf=T(e[0]); u(e[1]); for(const v of e.slice(2)) i(v); }
+  return new Uint8Array(b); }
+const EV_ARGS={1:2,2:3,3:2,4:1,5:1,6:1,7:3,8:1,9:3,10:1,11:1};
+function decodeReplay(b){
+  let p=0; const u=()=>{ let v=0,m=1,c; do{ if(p>=b.length) throw new Error('short'); c=b[p++]; v+=(c&127)*m; m*=128; }while(c&128); return v; };
+  const i=()=>{ const v=u(); return v%2?-(v+1)/2:v/2; };
+  if(u()!==1) return null;
+  const r={ops0:u(), n:u()*3, hp0:[], alive0:[], props0:[], tr:[], ev:[]};
+  for(let n=u();n--;){ r.hp0.push(u()); r.alive0.push(u()); }
+  for(let n=u();n--;) r.props0.push([u(),i(),i(),u(),u()]);
+  for(let n=u();n--;){ const t={typ:u(), id:u(), kind:u(), pts:[]}; let f=0,x=0,y=0; for(let k=u();k--;){ f+=u()*3; x+=i(); y+=i(); t.pts.push([f,x,y,u()]); } r.tr.push(t); }
+  let f=0; for(let n=u();n--;){ f+=u()*3; const ty=u(), a=[f,ty]; for(let k=0;k<(EV_ARGS[ty]||0);k++) a.push(i()); r.ev.push(a); }
+  return r; }
+function replayBytes(){ if(!REC||!REC.ev.some(e=>e[1]===1)) return null;
+  for(const tol of [1.5,3,5,8,12]){ const by=encodeReplay(REC,tol); if(by.length<=480) return by; }
+  return null; }
+// ---- player ----
+function interp(pts,f){ if(f<=pts[0][0]) return pts[0]; const L=pts[pts.length-1]; if(f>=L[0]) return L;
+  let a=0,b=pts.length-1; while(b-a>1){ const m=(a+b)>>1; if(pts[m][0]<=f) a=m; else b=m; }
+  const A=pts[a],B=pts[b],k=(f-A[0])/((B[0]-A[0])||1); return [f,A[1]+(B[1]-A[1])*k,A[2]+(B[2]-A[2])*k,A[3],B[1]-A[1],B[2]-A[2]]; }
+function startReplay(s,onDone){
+  const r=s.rpb?decodeReplay(s.rpb):null; if(!r){ onDone(); return; }
+  loadSnapshot(s); MATCH=null;
+  withSeed(s.seed,()=>genTerrain(s.tk)); SHOPPER=!!s.shop; INDESTRUCT=SHOPPER;
+  for(const o of s.ops.slice(0,r.ops0)){ if(o[0]===0) carve(o[1],o[2],o[3]); else placeGirder(o[1],o[2]); }
+  terrOps=[];
+  worms.forEach((w,k)=>{ w.hp=r.hp0[k]??w.hp; w.alive=!!(r.alive0[k]??w.alive); w.emote=null; w.say=null; w.rope=null; w.dying=null; });
+  props=r.props0.map(q=>({kind:q[0]===RPK.grave?'grave':'crate', type:q[0]===RPK.health?'health':'weapon', x:q[1], y:q[2], vx:0, vy:0, rest:true, team:teams[q[3]], _rid:q[4]}));
+  objs=[]; parts=[]; active=null; msg=null;
+  RP={r,s,f:0,ei:0,speed:1,done:onDone,ropes:{},objs:new Map(),last:null,gone:new Set()};
+  state='replay'; camFree=false; cam.z=vh/(vh<560?400:620); clampZoom();
+  document.getElementById('rpBar').classList.remove('hidden'); document.getElementById('topBtns').classList.add('hidden');
+  updateTouchUI(); }
+function endReplay(){ if(!RP) return; const d=RP.done; RP=null; document.getElementById('rpBar').classList.add('hidden'); objs=[]; parts=[]; msg=null; d(); }
+function replayStep(dt){
+  const P=RP, r=P.r; P.f+=P.speed;
+  while(P.ei<r.ev.length && r.ev[P.ei][0]<=P.f){ const e=r.ev[P.ei++], w=worms[e[2]];
+    switch(e[1]){
+      case 1: curTeam=e[2]; active=worms[e[3]]||null; if(active){ msg={text:`${teams[curTeam].name} — ${active.name}`, color:teams[curTeam].color, t:2.2}; P.last=active; } break;
+      case 2: boomFx(e[2],e[3],e[4]); sfx.boom(e[4]/50); shake=Math.min(20,shake+e[4]/4); break;
+      case 3: if(w){ w.hp=Math.max(0,w.hp-e[3]); floatText(w.x,w.y-26,'-'+e[3],w.team.color); emote(w,'hurt',0.8); sfxT('yelp',0.15); } break;
+      case 4: if(w){ w.alive=false; w.dying=null; addP({t:'ghost',x:w.x,y:w.y-4,f:w.facing,b:w.breed,c:w.team.color,life:2.4}); } break;
+      case 5: if(w){ w.alive=false; splash(w.x); floatText(w.x,WATER-20,'Splash!','#bfe6ff'); addP({t:'ghost',x:w.x,y:WATER-8,f:w.facing,b:w.breed,c:w.team.color,life:2.4}); } break;
+      case 6: { const wp=WEAPONS[e[2]]; if(wp) msg={text:wp.name, color:'#fff', t:1.6}; break; }
+      case 7: if(w) P.ropes[e[2]]={ax:e[3],ay:e[4],len:0}; break;
+      case 8: { const o=P.s.ops[e[2]-1]; if(o){ if(o[0]===0) carve(o[1],o[2],o[3]); else placeGirder(o[1],o[2]); } terrOps=[]; break; }
+      case 9: if(!props.some(q=>q._rid===e[2])) props.push({kind:e[3]===RPK.grave?'grave':'crate', type:e[3]===RPK.health?'health':'weapon', x:-999,y:-999,vx:0,vy:0,rest:true,team:teams[e[4]],_rid:e[2]}); break;
+      case 11: { P.gone.add(e[2]); const k=props.findIndex(q=>q._rid===e[2]); if(k>=0) props.splice(k,1); break; }
+      case 10: { if(w){ const t=pick(LINES.gloat); emote(w,'gloat',2); say(w,t,1.8); } break; }
+    } }
+  const live=new Set();
+  for(const t of r.tr){ const first=t.pts[0][0], last=t.pts[t.pts.length-1][0];
+    if(t.typ===0){ const w=worms[t.id]; if(!w) continue; const q=interp(t.pts,P.f); w.x=q[1]; w.y=q[2]; const fl=q[3]; w.facing=fl&1?1:-1; w.air=!!(fl&2); w.chute=!!(fl&4);
+      w.rope=(fl&8)&&P.ropes[t.id]?P.ropes[t.id]:null; w.dying=(fl&16)?(w.dying||{t:0}):null; if(w.dying) w.dying.t+=dt*P.speed;
+      if(P.f>=first&&P.f<=last&&(Math.abs(q[4]||0)+Math.abs(q[5]||0))>0) P.last=w; }
+    else if(t.typ===1){ if(P.f<first||P.gone.has(t.id)) continue; let o=P.objs.get(t.id); if(!o){ o={kind:RPK_N[t.kind],x:0,y:0,vx:0,vy:0}; P.objs.set(t.id,o); }
+      const q=interp(t.pts,P.f); o.x=q[1]; o.y=q[2]; if(q[4]!=null&&(q[4]||q[5])){ o.vx=q[4]; o.vy=q[5]; o.ang=Math.atan2(q[5],q[4]); } o.dir=q[3]&1?1:-1; o.flying=!!(q[3]&2); live.add(o); }
+    else { const pr=props.find(q=>q._rid===t.id); if(!pr||P.f<first) continue;
+      const q=interp(t.pts,P.f); pr.x=q[1]; pr.y=q[2]; pr.chute=!!(q[3]&1); } }
+  objs=[...live];
+  // camera: shot in flight, else the dog that last moved
+  let tx=null,ty=null,k=3; const o=objs[objs.length-1]; if(o){ tx=o.x; ty=o.y; k=5; } else if(P.last){ tx=P.last.x; ty=P.last.y; }
+  if(tx!=null){ const g=Math.min(1,dt*k); cam.x+=(tx-cam.x)*g; cam.y+=(ty-cam.y)*g; }
+  const hw=vw/2/cam.z, hh=vh/2/cam.z, xa=-200+hw, xb=W+200-hw; cam.x=xa>xb?W/2:clamp(cam.x,xa,xb); const ya=-350+hh, yb=H+40-hh; cam.y=ya>yb?(H-310)/2:clamp(cam.y,ya,yb);
+  shake*=Math.pow(0.88,dt*60); if(shake<0.2) shake=0;
+  for(const w of worms){ if(w.emote){ w.emote.t+=dt; if(w.emote.t>=w.emote.dur) w.emote=null; } if(w.say){ w.say.t-=dt; if(w.say.t<=0) w.say=null; } w.blink-=dt; if(w.blink<-0.12) w.blink=rnd(2,6); }
+  const pct=Math.min(1,P.f/Math.max(1,r.n)); document.getElementById('rpFill').style.width=(pct*100)+'%';
+  if(P.f>=r.n+45) endReplay();
+}
 function update(dt){
+  if(state==='replay'){ time+=dt; replayStep(dt); updateParts(dt); if(msg){ msg.t-=dt; if(msg.t<=0) msg=null; } return; }
   if(state!=='menu') updateFreeLook(dt);
   time+=dt;
   if(state==='menu'){ updateParts(dt); updateCam(dt); return; }
@@ -1770,6 +1906,7 @@ function update(dt){
       nextTurn(); break; }
   }
   if(msg){ msg.t-=dt; if(msg.t<=0) msg=null; }
+  recTick();
   updateCam(dt);
   updateTouchDim();
 }
@@ -2269,6 +2406,8 @@ function updateFreeLook(dt){
 function drawHUD(){
   if(state==='menu'||!teams.length) return;
   const t=teams[curTeam]||teams[0], L=12, T=10;
+  const RPL=state==='replay';
+  if(!RPL){
   // timer
   const tv = state==='retreat'? retreatT : turnT, s=String(Math.max(0,Math.ceil(tv)));
   ctx.fillStyle='rgba(8,12,28,.6)'; rr(ctx,L,T,58,46,12); ctx.fill(); ctx.strokeStyle=t.color; ctx.lineWidth=2.5; ctx.stroke();
@@ -2278,6 +2417,7 @@ function drawHUD(){
   const wp=curWp(), am=t.ammo[wpIdx]; let lab=`${wp.name}${am>=0?' ×'+am:''}`; if(wp.id==='shotgun'&&shotsLeft>0) lab+=` (${shotsLeft} left)`;
   ctx.font='600 13px system-ui,sans-serif'; const lw=ctx.measureText(lab).width+18;
   ctx.fillStyle='rgba(8,12,28,.6)'; rr(ctx,L,T+52,lw+22,24,10); ctx.fill(); drawSpr(wp.id,L+15,T+64,20,20); ctx.fillStyle='#fff'; ctx.textAlign='left'; ctx.fillText(lab,L+29,T+64.5);
+  }
   // wind
   const cx=vw/2, bw=Math.min(180,vw*0.32);
   ctx.fillStyle='rgba(8,12,28,.6)'; rr(ctx,cx-bw/2-6,T,bw+12,22,8); ctx.fill();
@@ -2299,7 +2439,7 @@ function drawHUD(){
     ctx.fillStyle='rgba(8,12,28,.7)'; rr(ctx,vw/2-mw/2,my-18,mw,36,18); ctx.fill(); ctx.fillStyle=msg.color; ctx.textAlign='center'; ctx.fillText(msg.text,vw/2,my+1); ctx.globalAlpha=1; }
   if(ai && state==='aim' && ai.phase==='think'){ ctx.font='600 12px system-ui'; ctx.textAlign='center'; ctx.fillStyle='rgba(255,255,255,.85)'; ctx.fillText('CPU is thinking…',vw/2,vh*0.26+34); }
   ctx.textBaseline='alphabetic';
-  drawMinimap(); drawIndicators();
+  if(!RPL){ drawMinimap(); drawIndicators(); }
 }
 
 // ---------- input ----------
@@ -2529,6 +2669,10 @@ document.getElementById('mapBtn').onclick=()=>mapFile.click();
 let playMode='local';
 document.querySelectorAll('#playSeg button').forEach(b=>b.onclick=()=>{ playMode=b.dataset.v; renderTeams(); if(stepIdx>lastStep()) showStep(lastStep()); else showStep(stepIdx); });
 document.getElementById('ciGo').onclick=startLoaded;
+document.getElementById('ciReplay').onclick=()=>{ const s=pendingLoad; if(!s) return; ensureAudio(); document.getElementById('codeIn').classList.add('hidden'); document.getElementById('menu').classList.add('hidden');
+  startReplay(s,()=>{ loadSnapshot(s); state='handoff'; document.getElementById('codeIn').classList.remove('hidden'); document.getElementById('ciReplay').textContent='Watch it again'; }); };
+document.getElementById('rpSkip').onclick=()=>endReplay();
+document.getElementById('rpSpeed').onclick=e=>{ if(!RP) return; RP.speed=RP.speed===1?2:1; e.target.textContent=RP.speed===1?'2×':'1×'; };
 document.getElementById('iiOk').onclick=()=>document.getElementById('inviteIn').classList.add('hidden');
 document.getElementById('invGo').onclick=()=>{ document.getElementById('invites').classList.add('hidden'); state='settle'; settleT=0.2; stateT=0; };
 document.getElementById('invMenu').onclick=()=>{ document.getElementById('invites').classList.add('hidden'); toMenu(); };
