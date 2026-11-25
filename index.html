@@ -380,7 +380,7 @@
       <div class="recap" id="ciRecap"></div>
       <p class="note" id="ciWarn" style="color:#ffd166;margin:8px 0 0"></p>
     </div>
-    <button class="btn hidden" id="ciReplay" style="width:100%;margin-top:10px">Watch the last turn</button>
+    <button class="btn hidden" id="ciReplay" style="width:100%;margin-top:10px">Watch the replay</button>
     <div class="btnRow"><button class="btn" id="ciCancel">Main menu</button><button class="big hidden" id="ciGo" style="margin:0;flex:1.4">Play</button></div>
   </div>
 </div>
@@ -1426,7 +1426,7 @@ async function previewCode(){
       else if(t.kh){ pendingMode='spectate'; document.getElementById('ciHead').innerHTML=`Waiting on ${escapeHtml(who)} — ${teamChip(fakeT)}`; document.getElementById('ciWarn').textContent=(document.getElementById('ciWarn').textContent?document.getElementById('ciWarn').textContent+' ':'')+`If this is your team, open your invite link first, then tap this link again.`; document.getElementById('ciGo').textContent='View battlefield'; }
       else { pendingMode='pin'; document.getElementById('ciGo').textContent=`Play ${poss(t.nm)} turn`; }
     }
-    const rb=document.getElementById('ciReplay'); rb.classList.toggle('hidden',!s.rpb); rb.textContent='Watch the last turn';
+    const rb=document.getElementById('ciReplay'); let rsec=0; try{ const rr0=s.rpb&&decodeReplay(s.rpb); if(rr0) rsec=Math.max(1,Math.round(rr0.n/60)); }catch(e){} rb.classList.toggle('hidden',!rsec); rb.textContent=`Watch the replay (${rsec} s)`;
     prev.classList.remove('hidden');
   }catch(e){ document.getElementById('ciReplay').classList.add('hidden'); err.textContent=e.message||String(e); pendingLoad=null; }
 }
@@ -1717,7 +1717,7 @@ function encodeReplay(rec,tol){
   u(1); u(rec.ops0); u(T(rec.f));
   u(rec.hp0.length); rec.hp0.forEach((h,k)=>{ u(h); u(rec.alive0[k]); });
   u(rec.props0.length); for(const p of rec.props0){ u(p[0]); i(p[1]); i(p[2]); u(p[3]); u(p[4]); }
-  const tr=[...rec.tr.entries()].filter(([k,t])=>t.pts.length>1 || k[0]!=='d');
+  const tr=[...rec.tr.entries()].filter(([k,t])=>t.pts.length>1 || k[0]!=='d' || rec.trimmed);
   u(tr.length);
   for(const [key,t] of tr){ const typ={d:0,o:1,p:2}[key[0]], id=+key.slice(1); u(typ); u(id); u(t.kind);
     const pts=simplify(t.pts,tol); u(pts.length); let pf=0, px=0, py=0;
@@ -1736,8 +1736,32 @@ function decodeReplay(b){
   for(let n=u();n--;){ const t={typ:u(), id:u(), kind:u(), pts:[]}; let f=0,x=0,y=0; for(let k=u();k--;){ f+=u()*3; x+=i(); y+=i(); t.pts.push([f,x,y,u()]); } r.tr.push(t); }
   let f=0; for(let n=u();n--;){ f+=u()*3; const ty=u(), a=[f,ty]; for(let k=0;k<(EV_ARGS[ty]||0);k++) a.push(i()); r.ev.push(a); }
   return r; }
+// Keep only the last `sec` seconds: rebuild the starting picture at the cut point.
+function trimRec(rec,sec){
+  const cut=rec.f-Math.round(sec*60); if(cut<=0) return rec;
+  const before=rec.ev.filter(e=>e[0]<=cut), after=rec.ev.filter(e=>e[0]>cut).map(e=>[e[0]-cut,...e.slice(1)]);
+  const hp=rec.hp0.slice(), alive=rec.alive0.slice(); let ops=rec.ops0; const gone=new Set(), spawned=new Map(), rope={}; let lastTurn=null, lastFire=null;
+  for(const e of before){ switch(e[1]){ case 1: lastTurn=e; lastFire=null; break; case 3: hp[e[2]]=Math.max(0,hp[e[2]]-e[3]); break; case 4: case 5: alive[e[2]]=0; break;
+    case 6: lastFire=e; break; case 7: rope[e[2]]=e; break; case 8: ops=e[2]; break; case 9: spawned.set(e[2],e); break; case 11: gone.add(e[2]); break; } }
+  const at=(pts)=>{ const q=interp(pts,cut); return [0,Math.round(q[1]),Math.round(q[2]),q[3]]; };
+  const tr=new Map();
+  for(const [key,t] of rec.tr){ const id=+key.slice(1);
+    if(key[0]!=='d' && gone.has(id)) continue;
+    const later=t.pts.filter(q=>q[0]>cut).map(q=>[q[0]-cut,q[1],q[2],q[3]]);
+    const pts=t.pts[0][0]>cut ? later : [at(t.pts), ...later];
+    if(!pts.length) continue;
+    tr.set(key,{kind:t.kind,pts}); }
+  const props0=[]; const addProp=(id,kind,team)=>{ const t=rec.tr.get('p'+id); if(!t||gone.has(id)) return; const q=at(t.pts); props0.push([kind,q[1],q[2],team,id]); };
+  for(const q of rec.props0) addProp(q[4],q[0],q[3]);
+  for(const [id,e] of spawned) addProp(id,e[3],e[4]);
+  const pre=[]; if(lastTurn) pre.push([0,...lastTurn.slice(1)]); if(lastFire) pre.push([0,...lastFire.slice(1)]);
+  for(const [d,e] of Object.entries(rope)){ const t=rec.tr.get('d'+d); if(t && (at(t.pts)[3]&8)) pre.push([0,...e.slice(1)]); }
+  return {trimmed:true, f:rec.f-cut, ops0:ops, hp0:hp, alive0:alive, props0, tr, ev:[...pre,...after]};
+}
+const REPLAY_SECONDS=10;
 function replayBytes(){ if(!REC||!REC.ev.some(e=>e[1]===1)) return null;
-  for(const tol of [1.5,3,5,8,12]){ const by=encodeReplay(REC,tol); if(by.length<=480) return by; }
+  for(const sec of [REPLAY_SECONDS,7,5,3]){ const rec=trimRec(REC,sec);
+    for(const tol of [1.5,3,6,10]){ const by=encodeReplay(rec,tol); if(by.length<=500) return by; } }
   return null; }
 // ---- player ----
 function interp(pts,f){ if(f<=pts[0][0]) return pts[0]; const L=pts[pts.length-1]; if(f>=L[0]) return L;
