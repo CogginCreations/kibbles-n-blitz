@@ -1360,14 +1360,38 @@ async function copyCode(){
 }
 // ---- invites made in the menu (step 4) ----
 const INV_KEY='kb:menuInv';
-const invSig=()=>cfgTeams.map(t=>t.cpu?'c':'h').join('');
+// ---- lasting player keys: a friend's phone keeps its key, so the same friends never need a new invite ----
+const pkHash=k=>sha('pk:'+k);
+function myKeys(){ try{ const a=JSON.parse(store.get('kb:keys')||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+function addKey(k){ if(!k) return; const a=myKeys().filter(x=>x!==k); a.unshift(k); store.set('kb:keys',JSON.stringify(a.slice(0,60))); }
+function myKey(){ let k=store.get('kb:mykey'); if(!k){ k=newSecret()+newSecret(); store.set('kb:mykey',k); } addKey(k); return k; }
+function loadFriends(){ try{ return JSON.parse(store.get('kb:friends')||'{}')||{}; }catch(e){ return {}; } }
+function saveFriends(f){ store.set('kb:friends',JSON.stringify(f)); }
+const fkey=n=>String(n||'').trim().toLowerCase();
+let keyHashCache=new Map();
+async function mineSet(s){ const out=new Set(), keys=myKeys();
+  for(const k of keys) if(!keyHashCache.has(k)) keyHashCache.set(k,await pkHash(k));
+  for(let i=0;i<s.teams.length;i++){ const t=s.teams[i]; if(!t.kh) continue;
+    const sec=store.get(claimKey(s.id,i));
+    if(sec && (hashEq(await keyHashOf(s.id,i,sec),t.kh) || hashEq(await pkHash(sec),t.kh))){ out.add(i); continue; }
+    for(const k of keys) if(hashEq(keyHashCache.get(k),t.kh)){ out.add(i); break; } }
+  return out; }
+const invSig=()=>cfgTeams.map(t=>t.cpu?'c':'h:'+fkey(t.player)).join('|');
 function loadInv(){ try{ return JSON.parse(store.get(INV_KEY)||'null'); }catch(e){ return null; } }
 function clearInvites(){ try{ localStorage.removeItem(INV_KEY); }catch(e){} }
 async function ensureInvites(){
   let inv=loadInv();
   if(!inv || inv.sig!==invSig()){
-    inv={id:Math.random().toString(36).slice(2,10), sig:invSig(), secrets:{}, hashes:{}, sent:{}};
-    for(let i=0;i<cfgTeams.length;i++) if(!cfgTeams[i].cpu){ inv.secrets[i]=newSecret(); inv.hashes[i]=await keyHashOf(inv.id,i,inv.secrets[i]); }
+    inv={id:Math.random().toString(36).slice(2,10), sig:invSig(), secrets:{}, hashes:{}, sent:{}, known:{}};
+    const fr=loadFriends(); let first=true;
+    for(let i=0;i<cfgTeams.length;i++){ const t=cfgTeams[i]; if(t.cpu) continue;
+      let sec;
+      if(first){ sec=myKey(); first=false; }
+      else { const nk=fkey(t.player), f=nk&&fr[nk];
+        if(f){ sec=f.secret; if(f.sent) inv.known[i]=1; }
+        else { sec=newSecret()+newSecret(); if(nk) fr[nk]={name:t.player.trim(), secret:sec, sent:0}; } }
+      inv.secrets[i]=sec; inv.hashes[i]=await pkHash(sec); }
+    saveFriends(fr);
     store.set(INV_KEY,JSON.stringify(inv));
   }
   return inv;
@@ -1389,10 +1413,12 @@ async function renderMenuInvites(){
     const tn=(t.name||'').trim()||DEFAULT_TEAMS[i], who=(t.player||'').trim();
     const link=`${LINK_BASE}#kbinv-${inv.id}-${i}-${inv.secrets[i]}`;
     const text=`Hey ${who||'there'}! You're the ${tn} in our Kibbles ’n’ Blitz match. Open this once so your phone remembers your team: ${link}`;
-    const row=document.createElement('div'); row.className='mInv'+(inv.sent[i]?' sent':'');
-    row.innerHTML=`<div class="who"><b>${escapeHtml(who||tn+' player')}</b><small>${teamChip({name:tn,color:t.color})}</small></div><div class="acts"><button class="cp">Copy</button><button class="send">${inv.sent[i]?'Sent':'Text invite'}</button></div><div class="st"></div>`;
+    const known=inv.known&&inv.known[i]&&!inv.sent[i];
+    const row=document.createElement('div'); row.className='mInv'+(inv.sent[i]||known?' sent':'');
+    row.innerHTML=`<div class="who"><b>${escapeHtml(who||tn+' player')}</b><small>${teamChip({name:tn,color:t.color})}</small></div><div class="acts"><button class="cp">Copy</button><button class="send">${inv.sent[i]?'Sent':known?'Resend':'Text invite'}</button></div><div class="st"></div>`;
     const st=row.querySelector('.st');
-    const mark=()=>{ inv.sent[i]=1; store.set(INV_KEY,JSON.stringify(inv)); row.classList.add('sent'); row.querySelector('.send').textContent='Sent'; updateNote(); };
+    if(known) st.textContent=`Already set up from a past game. No invite needed unless ${who||'they'} switched phones.`;
+    const mark=()=>{ inv.sent[i]=1; store.set(INV_KEY,JSON.stringify(inv)); const fr=loadFriends(), nk=fkey(t.player); if(nk&&fr[nk]){ fr[nk].sent=1; saveFriends(fr); } row.classList.add('sent'); row.querySelector('.send').textContent='Sent'; updateNote(); };
     row.querySelector('.send').onclick=async()=>{ const r=await shareText(text);
       if(r==='shared'){ st.textContent=''; mark(); }
       else if(r==='copied'){ st.textContent=`Invite copied. Paste it into a text to ${who||'your friend'}.`; mark(); }
@@ -1400,14 +1426,15 @@ async function renderMenuInvites(){
     row.querySelector('.cp').onclick=async()=>{ if(await copyText(text)){ st.textContent=`Copied. Paste it into a text to ${who||'your friend'}.`; mark(); } else st.textContent='Couldn’t copy on this browser.'; };
     list.appendChild(row);
   }
-  const updateNote=()=>{ const left=friends.filter(([t,i])=>!inv.sent[i]).map(([t,i])=>(t.player||'').trim()||((t.name||'').trim()||DEFAULT_TEAMS[i]));
-    note.textContent = left.length ? `Still to send: ${left.join(', ')}. You can start anyway; they just need their invite before their first turn.` : `All invites sent. This phone plays as ${(host[0].name||'').trim()||DEFAULT_TEAMS[host[1]]}.`; };
+  const updateNote=()=>{ const left=friends.filter(([t,i])=>!inv.sent[i]&&!(inv.known&&inv.known[i])).map(([t,i])=>(t.player||'').trim()||((t.name||'').trim()||DEFAULT_TEAMS[i]));
+    note.textContent = left.length ? `Still to send: ${left.join(', ')}. You can start anyway; they just need their invite before their first turn.` : `Everyone's set. This phone plays as ${(host[0].name||'').trim()||DEFAULT_TEAMS[host[1]]}.`; };
   updateNote();
 }
-let pendingLoad=null, pendingMode='pin';
+let pendingLoad=null, pendingMode='pin', pendingMine=new Set();
 async function previewCode(){
   const err=document.getElementById('ciErr'), prev=document.getElementById('ciPrev'); err.textContent=''; prev.classList.add('hidden');
   try{
+    pendingMine=new Set();
     const s=await decodeMatch(matchCodeFromHash()); pendingLoad=s;
     const seen=+store.get(`bark:${s.id}:seen`)||0, t=s.teams[s.cur];
     const fakeT={name:t.nm,color:t.c};
@@ -1417,8 +1444,8 @@ async function previewCode(){
     pendingMode='pin'; const who=t.pl||`the ${t.nm} player`;
     if(s.over!=null){ document.getElementById('ciGo').textContent='View final battlefield'; pendingMode='over'; }
     else {
-      const sec=store.get(claimKey(s.id,s.cur)), mine= !!(sec && t.kh && hashEq(await keyHashOf(s.id,s.cur,sec),t.kh));
-      let mineOther=-1; for(let i=0;i<s.teams.length;i++){ if(i!==s.cur && store.get(claimKey(s.id,i))) mineOther=i; }
+      const ms=await mineSet(s); pendingMine=ms; const mine=ms.has(s.cur);
+      let mineOther=-1; for(const i of ms) if(i!==s.cur) mineOther=i;
       if(mine){ pendingMode='mine'; document.getElementById('ciHead').innerHTML=`Your turn${t.pl?', '+escapeHtml(t.pl):''}! ${teamChip(fakeT)}`; document.getElementById('ciGo').textContent='Play my turn'; }
       else if(mineOther>=0 && !t.ph){ pendingMode='spectate'; document.getElementById('ciHead').innerHTML=`Waiting on ${escapeHtml(who)} — ${teamChip(fakeT)}`; document.getElementById('ciGo').textContent='View battlefield'; }
       else if(t.ph){ pendingMode='pin'; document.getElementById('ciGo').textContent=`Play ${poss(t.nm)} turn`; }
@@ -1437,7 +1464,7 @@ function startLoaded(){
   loadSnapshot(s);
   if(s.over!=null){ state='over'; const w=s.over>=0?teams[s.over]:null; active=null; showOver(w); return; }
   const go=()=>{ const k=`bark:${s.id}:t${s.turn}`, n=(+store.get(k)||0)+1; store.set(k,String(n)); MATCH.att=n; recStart(); beginTurn(); };
-  for(let i=0;i<teams.length;i++){ if(store.get(claimKey(s.id,i))) MATCH.mine.add(i); }
+  for(const i of pendingMine) MATCH.mine.add(i);
   if(pendingMode==='spectate'){ MATCH.mine.clear(); state='handoff'; const t=teams[curTeam]; document.getElementById('specText').textContent=`Waiting on ${t.player||'the '+t.name+' player'}`; document.getElementById('specBar').classList.remove('hidden'); camFree=true; return; }
   if(pendingMode==='mine'){ const t=teams[curTeam]; if(!t.pinHash && !storageWorks()) { pinGate(go); return; } go(); return; }
   MATCH.mine.clear(); MATCH.mine.add(curTeam);
@@ -2660,7 +2687,7 @@ function renderTeams(){
     previews.push({cv:pvc, c2:pvc.getContext('2d'), t, i});
     sel.value=t.cpu?'c':'h'; inp.oninput=()=>{ t.name=inp.value; syncMenu(); }; sel.onchange=()=>{ t.cpu=sel.value==='c'; renderTeams(); };
     const x=row.querySelector('.x'); if(x) x.onclick=()=>{ cfgTeams.splice(i,1); openPal=-1; renderTeams(); };
-    const pli=row.querySelector('.pl'); if(pli) pli.oninput=()=>{ t.player=pli.value; };
+    const pli=row.querySelector('.pl'); if(pli){ pli.setAttribute('list','friendNames'); pli.setAttribute('autocomplete','off'); pli.oninput=()=>{ t.player=pli.value; }; }
     row.querySelector('.cl').onclick=()=>{ openPal = openPal===i ? -1 : i; renderTeams(); };
     if(openPal===i){
       const pal=document.createElement('div'); pal.className='palRow';
@@ -2676,6 +2703,7 @@ function renderTeams(){
     }
     el.appendChild(row);
   });
+  { let dl=document.getElementById('friendNames'); if(!dl){ dl=document.createElement('datalist'); dl.id='friendNames'; document.body.appendChild(dl); } dl.innerHTML=Object.values(loadFriends()).filter(f=>f.sent).map(f=>`<option value="${escapeHtml(f.name)}">`).join(''); }
   document.getElementById('addTeam').style.display = cfgTeams.length<4 ? '' : 'none';
   if(typeof syncMenu==='function') syncMenu();
 }
@@ -2709,7 +2737,7 @@ async function openFromLink(){
   const code=matchCodeFromHash(); if(!code||code===lastOpened) return; lastOpened=code;
   if(state!=='menu') toMenu();
   const inv=code.match(/^kbinv-([0-9a-z]+)-(\d)-([0-9a-z]+)$/i);
-  if(inv){ const ok=storageWorks(); store.set(claimKey(inv[1],+inv[2]),inv[3]);
+  if(inv){ const ok=storageWorks(); store.set(claimKey(inv[1],+inv[2]),inv[3]); addKey(inv[3]);
     document.getElementById('iiTitle').textContent="You're in!";
     document.getElementById('iiSub').textContent = ok ? "This phone now knows which team is yours. When it's your turn, a link will show up in the group chat — just tap it to play." : "This browser can't remember your team. When it's your turn, tap the link and you'll set a PIN instead.";
     document.getElementById('inviteIn').classList.remove('hidden'); clearMatchHash(); return; }
