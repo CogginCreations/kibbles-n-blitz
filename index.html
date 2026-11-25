@@ -305,6 +305,8 @@
         </ol>
         <div id="mInvList"></div>
         <p class="note" id="mInvNote" style="margin:10px 0 0"></p>
+        <button class="btn" id="mInvReset" style="margin-top:12px">Make fresh links for everyone</button>
+        <p class="note" style="margin:6px 0 0">Use this if anyone ended up on the wrong team or in the game twice. Everyone gets a brand-new invite and old ones stop working.</p>
       </section>
     </div>
     <div class="mFoot">
@@ -351,7 +353,7 @@
           <p><b>Air Strike, Teleport, Girder:</b> place with the mouse, a tap or the arrow keys, then confirm with click / FIRE / Space.</p></details>
         <details><summary>Playing with friends online</summary>
           <p>Choose <b>Online — pass a link</b> on the Play tab. Team 1 goes first, then turns follow the team order; CPU teams play themselves.</p>
-          <p>When you start the match, copy a personal invite for each friend and text it to them. They open it once and their phone remembers their team. After each turn, tap <b>Copy message</b> and paste it in your group chat — the right player taps the link and goes straight to their turn, everyone else sees who it's waiting on. If someone switches phones or their browser can't remember, they use a PIN instead.</p>
+          <p>When you start the match, copy a personal invite for each friend and text it to them. They open it once and their phone remembers their team. After each turn, tap <b>Copy message</b> and paste it in your group chat — the right player taps the link and goes straight to their turn, everyone else sees who it's waiting on. If someone switches phones or their browser can't remember, they use a PIN instead. If anyone lands on the wrong team or shows up twice, go to the Invite step and tap <b>Make fresh links for everyone</b>.</p>
           <p>Each link shows a recap of the last turn. Opening an older link than one you've already seen gives a warning, and replaying the same turn shows up in the next recap.</p></details>
         <details><summary>Shopper mode</summary>
           <p>Played in an indestructible city with a broken girder across the top to swing from. Every team starts with just an unlimited, long-range Ninja Rope and Parachute. A crate drops each turn — rope over, grab it to stock up on weapons, then use them on your rivals.</p></details>
@@ -397,7 +399,7 @@
   <div class="panel center">
     <h2 id="iiTitle">You're in!</h2>
     <p class="note" id="iiSub"></p>
-    <div class="btnRow"><button class="big" id="iiOk" style="margin:0">Got it</button></div>
+    <div class="btnRow"><button class="btn hidden" id="iiNo">No, that's not me</button><button class="big" id="iiOk" style="margin:0;flex:1.4">Got it</button></div>
   </div>
 </div>
 <div id="rpBar" class="hidden"><b>Replay</b><div class="rpTrack"><i id="rpFill"></i></div><button class="btn" id="rpSpeed">2×</button><button class="btn" id="rpSkip">Skip</button></div>
@@ -1375,6 +1377,14 @@ async function mineSet(s){ const out=new Set(), keys=myKeys();
     const sec=store.get(claimKey(s.id,i));
     if(sec && (hashEq(await keyHashOf(s.id,i,sec),t.kh) || hashEq(await pkHash(sec),t.kh))){ out.add(i); continue; }
     for(const k of keys) if(hashEq(keyHashCache.get(k),t.kh)){ out.add(i); break; } }
+  if(out.size>1){ // stray keys (e.g. someone opened another person's invite) — keep just this phone's real team
+    const own=store.get('kb:mykey'), me=fkey(store.get('kb:me'));
+    let pick=-1;
+    if(own){ const h=await pkHash(own); for(const i of out) if(hashEq(h,s.teams[i].kh)) pick=i; }
+    if(pick<0 && me) for(const i of out) if(fkey(s.teams[i].pl)===me) pick=i;
+    if(pick<0) for(const i of out) if(store.get(claimKey(s.id,i))){ pick=i; break; }
+    if(pick<0) pick=[...out][0];
+    return new Set([pick]); }
   return out; }
 const invSig=()=>cfgTeams.map(t=>t.cpu?'c':'h:'+fkey(t.player)).join('|');
 function loadInv(){ try{ return JSON.parse(store.get(INV_KEY)||'null'); }catch(e){ return null; } }
@@ -1409,9 +1419,10 @@ async function renderMenuInvites(){
   const humans=cfgTeams.map((t,i)=>[t,i]).filter(([t])=>!t.cpu);
   const host=humans[0], friends=humans.slice(1);
   if(!friends.length){ note.textContent='No friends to invite yet. Go back to Teams and set another team to Human.'; return; }
+  const nameErr=playerNameProblem(); if(nameErr){ note.textContent=nameErr; return; }
   for(const [t,i] of friends){
     const tn=(t.name||'').trim()||DEFAULT_TEAMS[i], who=(t.player||'').trim();
-    const link=`${LINK_BASE}#kbinv-${inv.id}-${i}-${inv.secrets[i]}`;
+    const link=`${LINK_BASE}#kbinv-${inv.id}-${i}-${inv.secrets[i]}-${encodeURIComponent(who)}`;
     const text=`Hey ${who||'there'}! You're the ${tn} in our Kibbles ’n’ Blitz match. Open this once so your phone remembers your team: ${link}`;
     const known=inv.known&&inv.known[i]&&!inv.sent[i];
     const row=document.createElement('div'); row.className='mInv'+(inv.sent[i]||known?' sent':'');
@@ -1430,6 +1441,16 @@ async function renderMenuInvites(){
     note.textContent = left.length ? `Still to send: ${left.join(', ')}. You can start anyway; they just need their invite before their first turn.` : `Everyone's set. This phone plays as ${(host[0].name||'').trim()||DEFAULT_TEAMS[host[1]]}.`; };
   updateNote();
 }
+function playerNameProblem(){
+  const humans=cfgTeams.filter(t=>!t.cpu), names=humans.map(t=>fkey(t.player));
+  if(names.some(n=>!n)) return 'Go back to Teams and type a name for every human player (including you), so each invite goes to the right person.';
+  const dup=names.find((n,i)=>names.indexOf(n)!==i); if(dup) return `Two teams have the same player name (“${humans[names.indexOf(dup)].player.trim()}”). Each person can only be on one team. Go back to Teams and fix it.`;
+  return ''; }
+function resetAllLinks(){
+  const old=store.get('kb:mykey'); try{ localStorage.removeItem('kb:mykey'); localStorage.removeItem('kb:friends'); }catch(e){}
+  if(old) store.set('kb:keys',JSON.stringify(myKeys().filter(k=>k!==old)));
+  keyHashCache=new Map(); clearInvites(); }
+document.getElementById('mInvReset').onclick=()=>{ resetAllLinks(); renderMenuInvites(); };
 let pendingLoad=null, pendingMode='pin', pendingMine=new Set();
 async function previewCode(){
   const err=document.getElementById('ciErr'), prev=document.getElementById('ciPrev'); err.textContent=''; prev.classList.add('hidden');
@@ -2736,14 +2757,30 @@ let lastOpened='';
 async function openFromLink(){
   const code=matchCodeFromHash(); if(!code||code===lastOpened) return; lastOpened=code;
   if(state!=='menu') toMenu();
-  const inv=code.match(/^kbinv-([0-9a-z]+)-(\d)-([0-9a-z]+)$/i);
-  if(inv){ const ok=storageWorks(); store.set(claimKey(inv[1],+inv[2]),inv[3]); addKey(inv[3]);
-    document.getElementById('iiTitle').textContent="You're in!";
-    document.getElementById('iiSub').textContent = ok ? "This phone now knows which team is yours. When it's your turn, a link will show up in the group chat — just tap it to play." : "This browser can't remember your team. When it's your turn, tap the link and you'll set a PIN instead.";
-    document.getElementById('inviteIn').classList.remove('hidden'); clearMatchHash(); return; }
+  const inv=code.match(/^kbinv-([0-9a-z]+)-(\d)-([0-9a-z]+)(?:-(.+))?$/i);
+  if(inv){ clearMatchHash(); openInvite(inv[1],+inv[2],inv[3],(inv[4]||'').trim()); return; }
   document.getElementById('ciGo').classList.add('hidden'); document.getElementById('codeIn').classList.remove('hidden');
   await previewCode(); document.getElementById('ciGo').classList.toggle('hidden',!pendingLoad);
 }
+function openInvite(id,idx,sec,name){
+  const T=document.getElementById('iiTitle'), S=document.getElementById('iiSub'), ok=document.getElementById('iiOk'), no=document.getElementById('iiNo');
+  const show=()=>document.getElementById('inviteIn').classList.remove('hidden');
+  const done=()=>{ no.classList.add('hidden'); ok.textContent='Got it'; ok.onclick=()=>document.getElementById('inviteIn').classList.add('hidden'); };
+  const claim=()=>{ const works=storageWorks(); store.set(claimKey(id,idx),sec); addKey(sec); if(name) store.set('kb:me',name);
+    T.textContent="You're in!";
+    S.textContent = works ? "This phone now knows which team is yours. When it's your turn, a link will show up in the group chat — just tap it to play." : "This browser can't remember your team. When it's your turn, tap the link and you'll set a PIN instead.";
+    done(); };
+  // the host tapping an invite they sent shouldn't take over that friend's team
+  const mine=Object.values(loadFriends()).some(f=>f.secret===sec) || (loadInv()||{}).id===id;
+  if(mine){ T.textContent='This invite is for '+(name||'a friend');
+    S.textContent=`You made this invite, so this phone won't join ${name?name+"'s":'their'} team. Just send it to ${name||'them'}.`; done(); show(); return; }
+  if(!name){ claim(); show(); return; }
+  const me=store.get('kb:me');
+  T.textContent=`Are you ${name}?`;
+  S.textContent = me && fkey(me)!==fkey(name) ? `This phone is set up for ${me}, but this invite is for ${name}. Only tap Yes if you really are ${name}.` : `This invite is for ${name}. Only tap Yes if that's you — if it was sent to a group chat, ignore it and wait for your own.`;
+  no.classList.remove('hidden'); ok.textContent=`Yes, I'm ${name}`; ok.onclick=claim;
+  no.onclick=()=>{ T.textContent='No problem'; S.textContent=`Nothing was saved. Ask the host to text you your own invite.`; done(); };
+  show(); }
 window.addEventListener('hashchange',openFromLink);
 document.getElementById('hoCopy').onclick=sendCode; document.getElementById('hoCopy2').onclick=copyCode;
 document.getElementById('hoMenu').onclick=()=>{ document.getElementById('handoff').classList.add('hidden'); toMenu(); };
@@ -2800,7 +2837,7 @@ document.getElementById('mapClear').onclick=()=>{ customMap=null; mapFile.value=
 const nW=document.getElementById('nWorms'); nW.oninput=()=>{ document.getElementById('nv').textContent=nW.value; syncMenu(); };
 document.getElementById('startBtn').onclick=async()=>{
   ensureAudio();
-  let inv=null; if(playMode==='codes'){ inv=await ensureInvites(); }
+  let inv=null; if(playMode==='codes'){ const ne=playerNameProblem(); if(ne && cfgTeams.filter(t=>!t.cpu).length>1){ showStep(3); return; } inv=await ensureInvites(); }
   document.getElementById('menu').classList.add('hidden');
   newGame({teams:cfgTeams.map((t,i)=>({name:(t.name||'').trim()||DEFAULT_TEAMS[i],cpu:t.cpu,breed:t.breed,color:t.color,player:(t.player||'').trim()})), n:+nW.value, turnTime:+document.getElementById('tTime').value, theme:themeSel.value, mode:modeSel.value, codes:playMode==='codes', inv});
 };
